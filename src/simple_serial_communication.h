@@ -2,199 +2,256 @@
 #define _SIMPLE_SERIAL_COMMUNICATION_H_
 
 #include <Arduino.h>
+#include <string.h>
+#include "common.h"
 #include "crc.h"
 
-#define HEADER_1 0x55
-#define HEADER_2 0xAA
-
-enum RxState: uint8_t
+// ============================================================================
+// Receiver
+// PayloadSize is fixed at compile time.
+// Mode is compile-time selected; zero runtime overhead.
+// TimeoutMicros = 0 disables timeout reset.
+// ============================================================================
+template <uint16_t PayloadSize,
+          IntegrityMode Mode = IntegrityMode::CRC16_TABLE,
+          uint32_t TimeoutMicros = 0>
+class FixedPacketReceiver
 {
-    WAIT_HEADER_1, WAIT_HEADER_2, WAIT_PAYLOAD, WAIT_CRC_1, WAIT_CRC_2
+public:
+    static constexpr uint16_t payload_size = PayloadSize;
+    static constexpr IntegrityMode integrity_mode = Mode;
+
+    FixedPacketReceiver()
+    {
+        reset();
+    }
+
+    inline void reset()
+    {
+        state = RxState::WAIT_HEADER_1;
+        index = 0;
+        rx_check = 0;
+        integrity_reset<Mode>(check_state);
+        last_byte_time = 0;
+    }
+
+    inline RxState state() const { return state; }
+    inline uint16_t bytes_received() const { return index; }
+
+    inline bool poll(HardwareSerial& serial, uint8_t* payload)
+    {
+        return poll_with_budget(serial, payload, 0);
+    }
+
+    // maxBytesToProcess = 0 means "process everything available"
+    inline bool poll_with_budget(HardwareSerial& serial, uint8_t* payload, uint16_t maxBytesToProcess)
+    {
+        uint16_t processed = 0;
+
+        while (serial.available() > 0)
+        {
+            if (maxBytesToProcess != 0 && processed >= maxBytesToProcess)
+                break;
+
+            const uint8_t data = static_cast<uint8_t>(serial.read());
+            ++processed;
+
+            if constexpr (TimeoutMicros > 0)
+            {
+                const uint32_t now = micros();
+                if (last_byte_time != 0 && static_cast<uint32_t>(now - last_byte_time) > TimeoutMicros)
+                {
+                    reset();
+                }
+                last_byte_time = now;
+            }
+
+            switch (state)
+            {
+                case RxState::WAIT_HEADER_1:
+                    if (data == SERIAL_PACKET_HEADER_1)
+                        state = RxState::WAIT_HEADER_2;
+                    break;
+
+                case RxState::WAIT_HEADER_2:
+                    if (data == SERIAL_PACKET_HEADER_2)
+                    {
+                        state = RxState::WAIT_PAYLOAD;
+                        index = 0;
+                        rx_check = 0;
+                        integrity_reset<Mode>(check_state);
+                    }
+                    else
+                    {
+                        // Faster resync when headers overlap, e.g. 55 55 AA
+                        state = (data == SERIAL_PACKET_HEADER_1)
+                               ? RxState::WAIT_HEADER_2
+                               : RxState::WAIT_HEADER_1;
+                    }
+                    break;
+
+                case RxState::WAIT_PAYLOAD:
+                    payload[index_++] = data;
+                    integrity_update<Mode>(check_state, data);
+
+                    if (index == PayloadSize)
+                        state = RxState::WAIT_CHECK_1;
+                    break;
+
+                case RxState::WAIT_CHECK_1:
+                    rx_check = data;
+                    state = RxState::WAIT_CHECK_2;
+                    break;
+
+                case RxState::WAIT_CHECK_2:
+                {
+                    rx_check |= static_cast<uint16_t>(data) << 8;
+                    const uint16_t expected = integrity_value<Mode>(check_state);
+                    state = RxState::WAIT_HEADER_1;
+
+                    if (rx_check == expected)
+                        return true;
+
+                    break;
+                }
+
+                default:
+                    reset();
+                    break;
+            }
+        }
+
+        return false;
+    }
+
+private:
+    RxState state;
+    uint16_t index;
+    uint16_t rx_check;
+    IntegrityState<Mode> check_state;
+    uint32_t last_byte_time;
 };
 
-template <typename... T>
-inline void packData(uint8_t*& buffer, const T&... args)
+// ============================================================================
+// TX helpers
+// One contiguous write for lower overhead.
+// ============================================================================
+template <IntegrityMode Mode = IntegrityMode::CRC16_TABLE, typename... T>
+inline void send_packet_var_args(HardwareSerial& serial, const T&... args)
 {
-    ((memcpy(buffer, &args, sizeof(args)), buffer += sizeof(args)), ...);
-}
+    constexpr uint16_t payloadSize = (sizeof(T) + ...);
+    constexpr uint16_t packetSize = 2 + payloadSize + 2;
 
-template <typename... T>
-void send_packet_var_args(HardwareSerial& serial, const T&... args)
-{
-    constexpr uint16_t payLoadSize = (sizeof(T) + ...);
-    constexpr uint16_t packetSize = 2 + payLoadSize + 2;
-    static uint8_t buffer[packetSize];
-    buffer[0] = HEADER_1;
-    buffer[1] = HEADER_2;
-    uint8_t* ptr = &buffer[2];
+    uint8_t packet[packetSize];
+    packet[0] = PACKET_HEADER_1;
+    packet[1] = PACKET_HEADER_2;
 
+    uint8_t* ptr = &packet[2];
     packData(ptr, args...);
 
-    uint16_t crc16 = compute_crc16(&buffer[2], payLoadSize);
-    buffer[packetSize - 2] = uint8_t(crc16 & 0x00FF);
-    buffer[packetSize - 1] = uint8_t((crc16 >> 8) & 0x00FF);
+    const uint16_t check = compute_integrity16<Mode>(&packet[2], payloadSize);
+    packet[2 + payloadSize]     = static_cast<uint8_t>(check & 0xFF);
+    packet[2 + payloadSize + 1] = static_cast<uint8_t>((check >> 8) & 0xFF);
 
-    serial.write(buffer, packetSize);
+    serial.write(packet, packetSize);
 }
 
-template <typename... T>
-inline void unpackData(const uint8_t*& buffer, T&... args)
+template <IntegrityMode Mode = IntegrityMode::CRC16_TABLE>
+inline void send_packet_buffer(HardwareSerial& serial, const uint8_t* payload, uint16_t length)
 {
-    ((memcpy(&args, buffer, sizeof(args)), buffer += sizeof(args)), ...);
-}
+    uint8_t headers[2] = { PACKET_HEADER_1, PACKET_HEADER_2 };
+    const uint16_t check = compute_integrity16<Mode>(payload, length);
+    uint8_t checkBytes[2] = {
+        static_cast<uint8_t>(check & 0xFF),
+        static_cast<uint8_t>((check >> 8) & 0xFF)
+    };
 
-template <typename... T>
-bool receive_packet_var_args(HardwareSerial& serial, T&... args)
-{
-    constexpr uint16_t payLoadSize = (sizeof(T) + ...);
-    constexpr uint16_t packetSize = payLoadSize + 2;
-    static uint8_t buffer[payLoadSize];
-    static uint16_t idx = 0;
-    static RxState state = WAIT_HEADER_1;
-    static uint16_t crc16RX = 0;
-
-    while (serial.available())
-    {
-        uint8_t data = serial.read();
-
-        switch (state)
-        {
-            case WAIT_HEADER_1:
-                if (HEADER_1 == data) state = WAIT_HEADER_2;
-            break;
-
-            case WAIT_HEADER_2:
-            {
-                if (HEADER_2 == data)
-                {
-                    state = WAIT_PAYLOAD;
-                    idx = 0;
-                }
-                else state = WAIT_HEADER_1;
-            }
-            break;
-
-            case WAIT_PAYLOAD:
-            {
-                buffer[idx++] = data;
-                if (idx == payLoadSize) state = WAIT_CRC_1;
-            }
-            break;
-
-            case WAIT_CRC_1:
-            {
-                crc16RX = data;
-                state = WAIT_CRC_2;
-            }
-            break;
-
-            case WAIT_CRC_2:
-            {
-                crc16RX |= uint16_t(data) << 8;
-                if (crc16RX != compute_crc16(buffer, payLoadSize))
-                {
-                    state = WAIT_HEADER_1;
-                    crc16RX = 0;
-
-                    return false;
-                }
-
-                uint8_t* ptr = buffer;
-                unpackData(ptr, args...);
-
-                state = WAIT_HEADER_1;
-                crc16RX = 0;
-
-                return true;
-            }
-            break;
-
-            default:
-            break;
-        }
-
-        return false;
-    }
-}
-
-void send_packet_buffer(HardwareSerial& serial, const uint8_t* buffer, uint16_t length)
-{
-    const uint8_t headers[2] = {HEADER_1, HEADER_2};
-    uint16_t crc16 = compute_crc16(buffer, length);
-    uint8_t crc[2];
-    crc[0] = uint8_t(crc16 & 0x00FF);
-    crc[1] = uint8_t((crc16 >> 8) & 0x00FF);
-    
     serial.write(headers, 2);
-    serial.write(buffer, length);
-    serial.write(crc, 2);
+    serial.write(payload, length);
+    serial.write(checkBytes, 2);
 }
 
-bool receive_packet_buffer(HardwareSerial& serial, uint8_t* buffer, uint16_t length)
+// Compile-time-length version: fastest path, one write
+template <uint16_t PayloadSize, IntegrityMode Mode = IntegrityMode::CRC16_TABLE>
+inline void send_packet_buffer(HardwareSerial& serial, const uint8_t (&payload)[PayloadSize])
 {
-    static RxState state = WAIT_HEADER_1;
-    static uint16_t crc16RX = 0;
-    static uint16_t idx = 0;
+    constexpr uint16_t packetSize = 2 + PayloadSize + 2;
+    uint8_t packet[packetSize];
 
-    while (serial.available())
-    {
-        uint8_t data = serial.read();
-        
-        switch (state)
-        {
-            case WAIT_HEADER_1:
-                if (HEADER_1 == data) state = WAIT_HEADER_2;
-            break;
+    packet[0] = SERIAL_PACKET_HEADER_1;
+    packet[1] = SERIAL_PACKET_HEADER_2;
+    memcpy(&packet[2], payload, PayloadSize);
 
-            case WAIT_HEADER_2:
-            {
-                if (HEADER_2 == data)
-                {
-                    state = WAIT_PAYLOAD;
-                    idx = 0;
-                }
-                else state = WAIT_HEADER_1;
-            }
-            break;
+    const uint16_t check = compute_integrity16<Mode>(&packet[2], PayloadSize);
+    packet[2 + PayloadSize] = static_cast<uint8_t>(check & 0xFF);
+    packet[2 + PayloadSize + 1] = static_cast<uint8_t>((check >> 8) & 0xFF);
 
-            case WAIT_PAYLOAD:
-            {
-                buffer[idx++] = data;
-                if (idx == length) state = WAIT_CRC_1;
-            }
-            break;
+    serial.write(packet, packetSize);
+}
 
-            case WAIT_CRC_1:
-            {
-                crc16RX = data;
-                state = WAIT_CRC_2;
-            }
-            break;
+// ============================================================================
+// RX wrappers
+// ============================================================================
+template <uint16_t PayloadSize,
+          IntegrityMode Mode = IntegrityMode::CRC16_TABLE,
+          uint32_t TimeoutMicros = 0>
+inline bool receive_packet_buffer(
+    HardwareSerial& serial,
+    FixedPacketReceiver<PayloadSize, Mode, TimeoutMicros>& receiver,
+    uint8_t* payload)
+{
+    return receiver.poll(serial, payload);
+}
 
-            case WAIT_CRC_2:
-            {
-                crc16RX |= uint16_t(data) << 8;
-                if (crc16RX != compute_crc16(buffer, length))
-                {
-                    state = WAIT_HEADER_1;
-                    crc16RX = 0;
+template <uint16_t PayloadSize,
+          IntegrityMode Mode = IntegrityMode::CRC16_TABLE,
+          uint32_t TimeoutMicros = 0>
+inline bool receive_packet_buffer_with_budget(
+    HardwareSerial& serial,
+    FixedPacketReceiver<PayloadSize, Mode, TimeoutMicros>& receiver,
+    uint8_t* payload,
+    uint16_t maxBytesToProcess)
+{
+    return receiver.poll_with_budget(serial, payload, maxBytesToProcess);
+}
 
-                    return false;
-                }
+template <IntegrityMode Mode = IntegrityMode::CRC16_TABLE,
+          uint32_t TimeoutMicros = 0,
+          typename... T>
+inline bool receive_packet_var_args(
+    HardwareSerial& serial,
+    FixedPacketReceiver<(sizeof(T) + ...), Mode, TimeoutMicros>& receiver,
+    T&... args)
+{
+    constexpr uint16_t payloadSize = (sizeof(T) + ...);
+    uint8_t payload[payloadSize];
 
-                state = WAIT_HEADER_1;
-                crc16RX = 0;
-
-                return true;
-            }
-            break;
-
-            default:
-            break;
-        }
-
+    if (!receiver.poll(serial, payload))
         return false;
-    }
+
+    const uint8_t* ptr = payload;
+    unpackData(ptr, args...);
+    return true;
+}
+
+template <IntegrityMode Mode = IntegrityMode::CRC16_TABLE,
+          uint32_t TimeoutMicros = 0,
+          typename... T>
+inline bool receive_packet_var_args_with_budget(
+    HardwareSerial& serial,
+    FixedPacketReceiver<(sizeof(T) + ...), Mode, TimeoutMicros>& receiver,
+    uint16_t maxBytesToProcess,
+    T&... args)
+{
+    constexpr uint16_t payloadSize = (sizeof(T) + ...);
+    uint8_t payload[payloadSize];
+
+    if (!receiver.poll_with_budget(serial, payload, maxBytesToProcess))
+        return false;
+
+    const uint8_t* ptr = payload;
+    unpackData(ptr, args...);
+    return true;
 }
 
 #endif

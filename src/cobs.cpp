@@ -50,7 +50,7 @@ uint16_t cobs_decode(const uint8_t* __restrict cobsBuffer, uint16_t length, uint
     return static_cast<uint16_t>(outputPtr - dataBuffer);
 }
 
-uint16_t cobs_decode(uint8_t* cobsBuffer, uint16_t length)
+uint16_t cobs_decode_inplace(uint8_t* cobsBuffer, uint16_t length)
 {
     uint8_t* readPtr = cobsBuffer;
     uint8_t* writePtr = cobsBuffer;
