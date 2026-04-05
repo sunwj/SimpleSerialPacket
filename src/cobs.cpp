@@ -1,4 +1,5 @@
 #include "cobs.h"
+#include <memory.h>
 
 uint16_t cobs_encode(const uint8_t* __restrict dataBuffer, uint16_t length, uint8_t* __restrict cobsBuffer)
 {

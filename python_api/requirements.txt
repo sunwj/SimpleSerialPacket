@@ -1,0 +1,5 @@
+pyserial>=3.5
+cobs>=1.2.0
+# Optional fast CRC backend:
+# libscrc
+# crcmod

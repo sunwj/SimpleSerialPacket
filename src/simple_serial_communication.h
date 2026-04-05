@@ -35,8 +35,8 @@ public:
         last_byte_time = 0;
     }
 
-    inline RxState state() const { return state; }
-    inline uint16_t bytes_received() const { return index; }
+    inline RxState get_state() const { return state; }
+    inline uint16_t get_bytes_received() const { return index; }
 
     inline bool poll(HardwareSerial& serial, uint8_t* payload)
     {
@@ -69,12 +69,12 @@ public:
             switch (state)
             {
                 case RxState::WAIT_HEADER_1:
-                    if (data == SERIAL_PACKET_HEADER_1)
+                    if (data == PACKET_HEADER_1)
                         state = RxState::WAIT_HEADER_2;
                     break;
 
                 case RxState::WAIT_HEADER_2:
-                    if (data == SERIAL_PACKET_HEADER_2)
+                    if (data == PACKET_HEADER_2)
                     {
                         state = RxState::WAIT_PAYLOAD;
                         index = 0;
@@ -84,14 +84,14 @@ public:
                     else
                     {
                         // Faster resync when headers overlap, e.g. 55 55 AA
-                        state = (data == SERIAL_PACKET_HEADER_1)
+                        state = (data == PACKET_HEADER_1)
                                ? RxState::WAIT_HEADER_2
                                : RxState::WAIT_HEADER_1;
                     }
                     break;
 
                 case RxState::WAIT_PAYLOAD:
-                    payload[index_++] = data;
+                    payload[index++] = data;
                     integrity_update<Mode>(check_state, data);
 
                     if (index == PayloadSize)
@@ -178,8 +178,8 @@ inline void send_packet_buffer(HardwareSerial& serial, const uint8_t (&payload)[
     constexpr uint16_t packetSize = 2 + PayloadSize + 2;
     uint8_t packet[packetSize];
 
-    packet[0] = SERIAL_PACKET_HEADER_1;
-    packet[1] = SERIAL_PACKET_HEADER_2;
+    packet[0] = PACKET_HEADER_1;
+    packet[1] = PACKET_HEADER_2;
     memcpy(&packet[2], payload, PayloadSize);
 
     const uint16_t check = compute_integrity16<Mode>(&packet[2], PayloadSize);

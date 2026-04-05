@@ -1,5 +1,5 @@
-#ifndef _CRC16_INTEGRITY_H_
-#define _CRC16_INTEGRITY_H_
+#ifndef _CRC_H_
+#define _CRC_H_
 
 #include <Arduino.h>
 
@@ -124,7 +124,7 @@ inline void integrity_update(IntegrityState<Mode>& s, uint8_t byte)
     else if constexpr (Mode == IntegrityMode::CRC16_TABLE)
     {
         const uint8_t idx = static_cast<uint8_t>((s.value >> 8) ^ byte);
-        s.value = static_cast<uint16_t>((s.value << 8) ^ detail::crc16_table[idx]);
+        s.value = static_cast<uint16_t>((s.value << 8) ^ lookup_table::crc16_table[idx]);
     }
     else if constexpr (Mode == IntegrityMode::FLETCHER16)
     {

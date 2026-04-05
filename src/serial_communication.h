@@ -135,7 +135,7 @@ public:
             {
                 case RxState::WAIT_HEADER_1:
                     if (data == PACKET_HEADER_1)
-                        rx_state_ = RxState::WAIT_HEADER_2;
+                        rx_state = RxState::WAIT_HEADER_2;
                     break;
 
                 case RxState::WAIT_HEADER_2:
@@ -145,7 +145,7 @@ public:
                     }
                     else
                     {
-                        rx_state_ = (data == PACKET_HEADER_1)
+                        rx_state = (data == PACKET_HEADER_1)
                                   ? RxState::WAIT_HEADER_2
                                   : RxState::WAIT_HEADER_1;
                     }
@@ -366,7 +366,7 @@ public:
                     continue;
 
                 uint16_t rx_check = rx_decoded_buffer[payload_length];
-                rx_check |= static_cast<uint16_t>(rx_decoded_buffer_[payload_length + 1]) << 8;
+                rx_check |= static_cast<uint16_t>(rx_decoded_buffer[payload_length + 1]) << 8;
 
                 const uint16_t expected = compute_integrity16<Mode>(rx_decoded_buffer, payload_length);
 
@@ -387,7 +387,7 @@ public:
                 continue;
             }
 
-            rx_encoded_buffer[rx_encoded_length_++] = data;
+            rx_encoded_buffer[rx_encoded_length++] = data;
         }
 
         return false;
