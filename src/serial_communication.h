@@ -24,7 +24,7 @@ public:
     static constexpr uint16_t check_length = 2;
     static constexpr IntegrityMode integrity_mode = Mode;
 
-    SerialPacketTransfer() = default;
+    SerialPacketTransfer() {static_assert(MaxPayloadLength <= 255);};
 
     inline void reset_rx()
     {
@@ -238,7 +238,7 @@ public:
     static constexpr uint16_t raw_frame_max = static_cast<uint16_t>(MaxPayloadLength + check_length);
     static constexpr uint16_t cobs_encoded_max = static_cast<uint16_t>(raw_frame_max + ((raw_frame_max + 253) / 254));
 
-    SerialPacketTransferCOBS() = default;
+    SerialPacketTransferCOBS() {static_assert(MaxPayloadLength <= 255);};
 
     inline void reset_rx()
     {
@@ -481,10 +481,10 @@ inline bool receive_cobs_packet(
     if (!rx.poll(serial))
         return false;
 
-    if (rx.received_length() != payloadSize)
+    if (rx.get_received_length() != payloadSize)
         return false;
 
-    const uint8_t* ptr = rx.received_payload();
+    const uint8_t* ptr = rx.get_received_payload();
     serial_unpack_data(ptr, args...);
     return true;
 }
