@@ -29,7 +29,7 @@ The default and recommended mode is `CRC16_TABLE`.
 ## Repository layout
 
 ```text
-firmware/
+src/
   common.h
   crc.h
   cobs.h
